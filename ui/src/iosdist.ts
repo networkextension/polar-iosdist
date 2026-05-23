@@ -42,10 +42,10 @@ import {
   uploadIOSProfile,
   uploadIOSVersion,
 } from "./api/iosdist.js";
-import { fetchCurrentUser, logout } from "./api/session.js";
-import { byId } from "./lib/dom.js";
-import { hydrateSiteBrand, renderSidebarFoot } from "./lib/site.js";
-import { bindThemeSync, initStoredTheme } from "./lib/theme.js";
+import { fetchCurrentUser, logout } from "@networkextension/polar-ui-common/api/session";
+import { byId } from "@networkextension/polar-ui-common/lib/dom";
+import { hydrateSiteBrand, renderSidebarFoot } from "@networkextension/polar-ui-common/lib/site";
+import { bindThemeSync, initStoredTheme } from "@networkextension/polar-ui-common/lib/theme";
 import type {
   IOSApp,
   IOSASCApp,

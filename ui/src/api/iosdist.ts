@@ -1,7 +1,7 @@
 // Typed wrappers for /api/iosdist/* endpoints. Goes through http.ts so the
 // access-token refresh interceptor and credential-include settings apply.
 
-import { request, requestJson } from "./http.js";
+import { request, requestJson } from "@networkextension/polar-ui-common/api/http";
 import type {
   IOSApp,
   IOSAppCreateResponse,
