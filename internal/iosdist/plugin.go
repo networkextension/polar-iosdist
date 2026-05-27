@@ -377,11 +377,17 @@ func (p *Plugin) heartbeatLoop(ctx context.Context) {
 	}
 }
 
+// iosdistUIRoutes — sidebar entries this plugin contributes.
+var iosdistUIRoutes = []sdk.UIRoute{
+	{Path: "/iosdist.html", Label: "iOS 分发", Icon: "smartphone", AdminOnly: true, Order: 60},
+}
+
 func (p *Plugin) beat(_ context.Context) {
 	err := p.Dock.Heartbeat(sdk.HeartbeatOpts{
 		Version:       p.Ver,
 		Endpoint:      p.Listen,
 		UptimeSeconds: int64(time.Since(p.startedAt).Seconds()),
+		UIRoutes:      iosdistUIRoutes,
 	})
 	if err != nil {
 		log.Printf("iosdist: heartbeat failed: %v", err)
