@@ -45,6 +45,7 @@ import {
 import { fetchCurrentUser, logout } from "@networkextension/polar-ui-common/api/session";
 import { byId } from "@networkextension/polar-ui-common/lib/dom";
 import { hydrateSiteBrand, renderSidebarFoot } from "@networkextension/polar-ui-common/lib/site";
+import { mountPlatformNav } from "@networkextension/polar-ui-common/lib/sidebar";
 import { bindThemeSync, initStoredTheme } from "@networkextension/polar-ui-common/lib/theme";
 import type {
   IOSApp,
@@ -1455,6 +1456,7 @@ ascDeleteBtn.addEventListener("click", async () => {
 
 async function init(): Promise<void> {
   await hydrateSiteBrand();
+  void mountPlatformNav();
   const { response, data } = await fetchCurrentUser();
   if (!response.ok) {
     window.location.href = "/login.html";
