@@ -377,9 +377,11 @@ func (p *Plugin) heartbeatLoop(ctx context.Context) {
 	}
 }
 
-// iosdistUIRoutes — sidebar entries this plugin contributes.
+// iosdistUIRoutes — sidebar entries this plugin contributes. Heartbeated
+// up to dock; aggregated into /api/plugin-ui-routes for polar-dock-ui's
+// dynamic sidebar. See task #196.
 var iosdistUIRoutes = []sdk.UIRoute{
-	{Path: "/iosdist.html", Label: "iOS 分发", Icon: "smartphone", AdminOnly: true, Order: 60},
+	{Path: "/iosdist.html", Label: "iOS 分发", Icon: "smartphone", AdminOnly: true, Order: 65},
 }
 
 func (p *Plugin) beat(_ context.Context) {
