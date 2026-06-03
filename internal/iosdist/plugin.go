@@ -271,7 +271,7 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	// ── public surface (no auth — slug / token IS the auth) ──
 	r.GET("/iosdist/install/:token", p.handleIOSInstallPage)
 	r.GET("/iosdist/manifest/:token", p.handleIOSInstallManifest)
-	r.GET("/iosdist/icon/:appID", p.handleIOSAppIconRedirect)
+	r.GET("/iosdist/icon/:slug", p.handleIOSAppIconRedirect)
 	r.GET("/iosdist/share/:slug", p.handleIOSPublicShareHTML)
 	r.POST("/iosdist/share/:slug/install", p.handleIOSPublicShareInstall)
 	r.POST("/iosdist/share/:slug/test-request", p.handleIOSPublicShareTestRequest)
