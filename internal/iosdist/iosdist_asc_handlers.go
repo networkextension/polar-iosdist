@@ -594,14 +594,14 @@ func (p *Plugin) handleIOSAppASCSyncMeta(c *gin.Context) {
 					log.Printf("[iosdist asc-sync] app=%d downloadASCIcon failed all variants: %v", app.ID, dlErr)
 				} else {
 					log.Printf("[iosdist asc-sync] app=%d downloaded icon %d bytes (%s)", app.ID, len(data), ct)
-					persistedURL, persistErr := p.persistIOSDownloadedIcon(c, app.ID, data, ct)
+					assetID, persistErr := p.persistIOSDownloadedIcon(c, app.ID, data, ct)
 					if persistErr != nil {
 						log.Printf("[iosdist asc-sync] app=%d persistIOSDownloadedIcon failed: %v", app.ID, persistErr)
 					} else {
-						if err := p.setIOSAppIcon(app.ID, workspaceID, persistedURL, "asc"); err != nil {
-							log.Printf("[iosdist asc-sync] app=%d setIOSAppIcon failed: %v", app.ID, err)
+						if err := p.setIOSAppIconAsset(app.ID, workspaceID, assetID, "asc"); err != nil {
+							log.Printf("[iosdist asc-sync] app=%d setIOSAppIconAsset failed: %v", app.ID, err)
 						} else {
-							log.Printf("[iosdist asc-sync] app=%d icon updated → %s", app.ID, persistedURL)
+							log.Printf("[iosdist asc-sync] app=%d icon updated → asset:%d (route /iosdist/icon/%d)", app.ID, assetID, app.ID)
 							updatedFields = append(updatedFields, "图标")
 						}
 					}
@@ -615,16 +615,15 @@ func (p *Plugin) handleIOSAppASCSyncMeta(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"app": updated, "updated_fields": updatedFields})
 }
 
-// persistIOSDownloadedIcon writes raw icon bytes through the
-// AttachmentStorage. Mirrors persistIOSExtractedIcon (which takes an
-// ipaInfo) — split because callers want different ext/content-type
-// hints.
-func (p *Plugin) persistIOSDownloadedIcon(c *gin.Context, appID int64, data []byte, contentType string) (string, error) {
+// persistIOSDownloadedIcon single-writes raw icon bytes (fetched from ASC)
+// into the assets catalog and returns the catalog asset id. Mirrors
+// persistIOSExtractedIcon; the staged temp file is transient.
+func (p *Plugin) persistIOSDownloadedIcon(_ *gin.Context, appID int64, data []byte, contentType string) (int64, error) {
 	if p.BlobDir == "" {
-		return "", fmt.Errorf("upload dir not configured")
+		return 0, fmt.Errorf("upload dir not configured")
 	}
 	if err := os.MkdirAll(p.BlobDir, 0o755); err != nil {
-		return "", err
+		return 0, err
 	}
 	ext := ".png"
 	if strings.Contains(contentType, "jpeg") || strings.Contains(contentType, "jpg") {
@@ -633,17 +632,18 @@ func (p *Plugin) persistIOSDownloadedIcon(c *gin.Context, appID int64, data []by
 	storedName := fmt.Sprintf("iosdist_appicon_%d_%s%s", appID, generateSessionID()[:8], ext)
 	dstPath := filepath.Join(p.BlobDir, storedName)
 	if err := os.WriteFile(dstPath, data, 0o644); err != nil {
-		return "", err
+		return 0, err
 	}
-	publicURL, err := p.chatStorage.Store(c.Request.Context(), dstPath, storedName, contentType)
+	mime := contentType
+	if mime == "" {
+		mime = "image/png"
+	}
+	meta, err := p.uploadIOSBlobAsset(dstPath, "media", "iosdist/icon/"+iosdistRandHex(6)+ext, mime, "public")
+	removeLocalFile(dstPath)
 	if err != nil {
-		removeLocalFile(dstPath)
-		return "", err
+		return 0, err
 	}
-	if p.chatStorage.IsRemote() {
-		removeLocalFile(dstPath)
-	}
-	return publicURL, nil
+	return meta.ID, nil
 }
 
 // sanitizeASCIDInput strips common copy-paste artifacts (whitespace, ASCII
