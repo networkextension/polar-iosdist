@@ -221,11 +221,12 @@ func (p *Plugin) processIOSSignTask(ctx context.Context, taskID int64) {
 	}
 
 	storedName := fmt.Sprintf("iosdist_signed_%d_%s.ipa", taskID, generateSessionID()[:8])
-	publicURL, err := p.chatStorage.Store(ctx, outIPA, storedName, "application/octet-stream")
+	signedMeta, err := p.uploadIOSBlobAsset(outIPA, "package", "iosdist/ipa/"+iosdistRandHex(6)+".ipa", "application/octet-stream", "public")
 	if err != nil {
 		_ = p.markIOSSignTaskFailed(taskID, "上传签名 IPA 失败", logText+"\n"+err.Error())
 		return
 	}
+	publicURL := fmt.Sprintf("asset://%d", signedMeta.ID)
 
 	// Compose the new version row from the source + parsed output.
 	newVersion := &IOSVersion{
@@ -281,6 +282,10 @@ func pickDistTypeForSign(profileKind, sourceDist string) string {
 //   - "/uploads/<key>" — local AttachmentStorage; copy from the upload dir
 //   - http(s)://       — remote (R2 public, mzstatic, etc.); HTTP GET
 func (p *Plugin) fetchAttachmentToFile(ctx context.Context, srcURL, dstPath string) error {
+	// Catalog-backed blob (single-write): fetch via internal AssetDownload.
+	if id, ok := parseAssetRef(srcURL); ok {
+		return p.fetchAssetToFile(ctx, id, dstPath)
+	}
 	if strings.HasPrefix(srcURL, "/uploads/") && p.BlobDir != "" {
 		return copyFile(filepath.Join(p.BlobDir, strings.TrimPrefix(srcURL, "/uploads/")), dstPath)
 	}

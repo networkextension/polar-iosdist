@@ -215,7 +215,7 @@ func New(ctx context.Context, cfg Config) (*Plugin, error) {
 		log.Print("iosdist: WARN zsign not found on PATH (set IOSDIST_ZSIGN_PATH); sign tasks will be rejected")
 	}
 
-	return &Plugin{
+	p := &Plugin{
 		DB:                        db,
 		Dock:                      dock,
 		Name:                      cfg.PluginName,
@@ -235,7 +235,13 @@ func New(ctx context.Context, cfg Config) (*Plugin, error) {
 		metrics:                   newIOSDistMetrics(),
 		metricsRegistry:           newIOSDistMetricsRegistry(),
 		startedAt:                 time.Now(),
-	}, nil
+	}
+	// Blob→assets migration column — run synchronously so the icon
+	// redirect route can read icon_asset_id from the first request.
+	if err := p.ensureIOSDistAssetSchema(ctx); err != nil {
+		log.Printf("iosdist: ensure asset schema: %v", err)
+	}
+	return p, nil
 }
 
 // execLookPath wraps exec.LookPath. Kept as a thin wrapper so tests
@@ -265,6 +271,7 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	// ── public surface (no auth — slug / token IS the auth) ──
 	r.GET("/iosdist/install/:token", p.handleIOSInstallPage)
 	r.GET("/iosdist/manifest/:token", p.handleIOSInstallManifest)
+	r.GET("/iosdist/icon/:appID", p.handleIOSAppIconRedirect)
 	r.GET("/iosdist/share/:slug", p.handleIOSPublicShareHTML)
 	r.POST("/iosdist/share/:slug/install", p.handleIOSPublicShareInstall)
 	r.POST("/iosdist/share/:slug/test-request", p.handleIOSPublicShareTestRequest)
@@ -322,6 +329,7 @@ func (p *Plugin) Start(ctx context.Context) {
 	go p.heartbeatLoop(ctx)
 	go p.runIOSSignWorker(ctx)
 	p.startIOSDistStatusSync(ctx)
+	go p.backfillIOSDistAssetsOnce(ctx) // self-migrate legacy local/remote blobs → assets
 }
 
 func (p *Plugin) Close() error {

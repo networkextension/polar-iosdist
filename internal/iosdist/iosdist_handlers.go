@@ -270,16 +270,16 @@ func (p *Plugin) handleIOSAppIconUpload(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "文件保存失败"})
 		return
 	}
-	publicURL, err := p.chatStorage.Store(c.Request.Context(), dstPath, storedName, mimeType)
+	// Single-write to the central assets catalog — the staged file is
+	// transient (used only to stream the bytes up). icon_url then points
+	// at the redirect route via setIOSAppIconAsset.
+	meta, err := p.uploadIOSBlobAsset(dstPath, "media", "iosdist/icon/"+iosdistRandHex(6)+filepath.Ext(storedName), mimeType, "public")
+	removeLocalFile(dstPath)
 	if err != nil {
-		removeLocalFile(dstPath)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "文件上传失败"})
 		return
 	}
-	if p.chatStorage.IsRemote() {
-		removeLocalFile(dstPath)
-	}
-	if err := p.setIOSAppIcon(app.ID, workspaceID, publicURL, "manual"); err != nil {
+	if err := p.setIOSAppIconAsset(app.ID, workspaceID, meta.ID, "manual"); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器错误"})
 		return
 	}
@@ -662,21 +662,22 @@ func (p *Plugin) handleIOSVersionUpload(c *gin.Context) {
 		return
 	}
 
-	publicURL, err := p.chatStorage.Store(c.Request.Context(), dstPath, storedName, "application/octet-stream")
+	// Single-write to the assets catalog. The IPA is fetched directly by
+	// the iOS device via a signed URL minted at manifest time, so the row
+	// only stores an "asset://<id>" reference.
+	meta, err := p.uploadIOSBlobAsset(dstPath, "package", "iosdist/ipa/"+iosdistRandHex(6)+".ipa", "application/octet-stream", "public")
+	removeLocalFile(dstPath)
 	if err != nil {
-		removeLocalFile(dstPath)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "文件上传失败"})
 		return
 	}
-	if p.chatStorage.IsRemote() {
-		removeLocalFile(dstPath)
-	}
+	ipaRef := fmt.Sprintf("asset://%d", meta.ID)
 
 	v := &IOSVersion{
 		AppID:            app.ID,
 		Version:          version,
 		BuildNumber:      build,
-		IPAUrl:           publicURL,
+		IPAUrl:           ipaRef,
 		IPAFilename:      file.Filename,
 		IPASize:          file.Size,
 		IPASHA256:        sum,
@@ -713,8 +714,8 @@ func (p *Plugin) handleIOSVersionUpload(c *gin.Context) {
 	// operator hasn't explicitly uploaded a manual icon. Manual wins
 	// permanently — we never trample it.
 	if parsedIPA != nil && len(parsedIPA.IconBytes) > 0 && app.IconSource != "manual" {
-		if iconURL, err := p.persistIOSExtractedIcon(c, app.ID, parsedIPA); err == nil {
-			_ = p.setIOSAppIcon(app.ID, workspaceID, iconURL, "ipa")
+		if assetID, err := p.persistIOSExtractedIcon(c, app.ID, parsedIPA); err == nil {
+			_ = p.setIOSAppIconAsset(app.ID, workspaceID, assetID, "ipa")
 		} else {
 			log.Printf("iosdist: persist extracted icon for app %d failed: %v", app.ID, err)
 		}
@@ -727,12 +728,15 @@ func (p *Plugin) handleIOSVersionUpload(c *gin.Context) {
 // AttachmentStorage. We stage it through the upload dir because the
 // storage interface expects an on-disk path (it reuses the chat upload
 // path for R2 streaming).
-func (p *Plugin) persistIOSExtractedIcon(c *gin.Context, appID int64, info *ipaInfo) (string, error) {
+// persistIOSExtractedIcon stages the in-memory icon bytes (extracted from
+// the IPA) and single-writes them to the assets catalog, returning the
+// catalog asset id. The staged file is transient.
+func (p *Plugin) persistIOSExtractedIcon(_ *gin.Context, appID int64, info *ipaInfo) (int64, error) {
 	if p.BlobDir == "" {
-		return "", fmt.Errorf("upload dir not configured")
+		return 0, fmt.Errorf("upload dir not configured")
 	}
 	if err := os.MkdirAll(p.BlobDir, 0o755); err != nil {
-		return "", err
+		return 0, err
 	}
 	ext := ".png"
 	if info.IconContentType == "image/jpeg" {
@@ -741,17 +745,14 @@ func (p *Plugin) persistIOSExtractedIcon(c *gin.Context, appID int64, info *ipaI
 	storedName := fmt.Sprintf("iosdist_appicon_%d_%s%s", appID, generateSessionID()[:8], ext)
 	dstPath := filepath.Join(p.BlobDir, storedName)
 	if err := os.WriteFile(dstPath, info.IconBytes, 0o644); err != nil {
-		return "", err
+		return 0, err
 	}
-	publicURL, err := p.chatStorage.Store(c.Request.Context(), dstPath, storedName, info.IconContentType)
+	meta, err := p.uploadIOSBlobAsset(dstPath, "media", "iosdist/icon/"+iosdistRandHex(6)+ext, info.IconContentType, "public")
+	removeLocalFile(dstPath)
 	if err != nil {
-		removeLocalFile(dstPath)
-		return "", err
+		return 0, err
 	}
-	if p.chatStorage.IsRemote() {
-		removeLocalFile(dstPath)
-	}
-	return publicURL, nil
+	return meta.ID, nil
 }
 
 func (p *Plugin) handleIOSVersionDelete(c *gin.Context) {
@@ -892,7 +893,20 @@ func (p *Plugin) handleIOSInstallManifest(c *gin.Context) {
 	}
 	_ = p.bumpIOSInstallTokenAccess(token)
 
+	// The iOS device fetches the .ipa directly from this URL with no Polar
+	// session, so catalog-backed IPAs need a signed, publicly-reachable
+	// HTTPS URL minted fresh per install. Legacy local/remote IPAs keep
+	// their absolutized URL.
 	ipaURL := absolutizeURL(p.installPublicBaseURL(c), v.IPAUrl)
+	if id, ok := parseAssetRef(v.IPAUrl); ok {
+		signed, serr := p.Dock.AssetDownloadURL(id)
+		if serr != nil || signed == "" {
+			log.Printf("iosdist: manifest version=%d asset=%d signed-url failed: %v", v.ID, id, serr)
+			c.String(http.StatusBadGateway, "ipa url unavailable")
+			return
+		}
+		ipaURL = signed
+	}
 	// Apple requires manifest.plist's `bundle-identifier` to exactly
 	// match the IPA's embedded CFBundleIdentifier — otherwise the device
 	// rejects the install. Use the parsed value from the upload step
@@ -1115,15 +1129,15 @@ func (p *Plugin) handleIOSCertificateUpload(c *gin.Context) {
 		}
 	}
 
-	publicURL, err := p.chatStorage.Store(c.Request.Context(), dstPath, storedName, "application/octet-stream")
+	// Single-write to the assets catalog (private — fetched only by the
+	// sign worker via internal AssetDownload).
+	meta, err := p.uploadIOSBlobAsset(dstPath, "package", "iosdist/cert/"+iosdistRandHex(6), "application/octet-stream", "private")
+	removeLocalFile(dstPath)
 	if err != nil {
-		removeLocalFile(dstPath)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "文件上传失败"})
 		return
 	}
-	if p.chatStorage.IsRemote() {
-		removeLocalFile(dstPath)
-	}
+	publicURL := fmt.Sprintf("asset://%d", meta.ID)
 
 	cipher, encrypted, err := p.encryptIOSDistSecret(password)
 	if err != nil {
@@ -1283,15 +1297,15 @@ func (p *Plugin) handleIOSProfileUpload(c *gin.Context) {
 		}
 	}
 
-	publicURL, err := p.chatStorage.Store(c.Request.Context(), dstPath, storedName, "application/octet-stream")
+	// Single-write to the assets catalog (private — fetched only by the
+	// sign worker via internal AssetDownload).
+	meta, err := p.uploadIOSBlobAsset(dstPath, "package", "iosdist/profile/"+iosdistRandHex(6), "application/octet-stream", "private")
+	removeLocalFile(dstPath)
 	if err != nil {
-		removeLocalFile(dstPath)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "文件上传失败"})
 		return
 	}
-	if p.chatStorage.IsRemote() {
-		removeLocalFile(dstPath)
-	}
+	publicURL := fmt.Sprintf("asset://%d", meta.ID)
 
 	profile := &IOSProvisioningProfile{
 		OwnerUserID:  userID,
