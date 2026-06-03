@@ -106,17 +106,27 @@ func (p *Plugin) fetchAssetToFile(ctx context.Context, assetID int64, dstPath st
 	return err
 }
 
+// iconURLBase returns the absolute origin to prefix the icon redirect
+// route with, so icon_url is a fully-qualified URL that resolves from ANY
+// page (the iOS app, a shared link, another subdomain) — not just from
+// iosdist's own same-origin pages. Empty (IOSDIST_PUBLIC_BASE_URL unset)
+// falls back to a relative path, which only works same-origin.
+func (p *Plugin) iconURLBase() string {
+	return strings.TrimRight(p.publicBaseURL, "/")
+}
+
 // setIOSAppIconAsset points icon_url at the stable redirect route — keyed
 // by the app's opaque public_slug, NOT its sequential db id, so the public
 // URL doesn't leak record ids/counts — and records the backing asset id +
 // source in one UPDATE. public_slug is computed from the same row, so no
-// extra round-trip; createIOSApp guarantees every app has one.
+// extra round-trip; createIOSApp guarantees every app has one. The URL is
+// absolute (publicBaseURL prefix) so it works cross-origin.
 func (p *Plugin) setIOSAppIconAsset(appID int64, workspaceID string, assetID int64, source string) error {
 	_, err := p.DB.Exec(
 		`UPDATE iosdist_apps
-		 SET icon_url = '/iosdist/icon/' || public_slug, icon_asset_id = $1, icon_source = $2, updated_at = now()
-		 WHERE id = $3 AND workspace_id = $4 AND public_slug <> ''`,
-		assetID, source, appID, workspaceID,
+		 SET icon_url = $1 || '/iosdist/icon/' || public_slug, icon_asset_id = $2, icon_source = $3, updated_at = now()
+		 WHERE id = $4 AND workspace_id = $5 AND public_slug <> ''`,
+		p.iconURLBase(), assetID, source, appID, workspaceID,
 	)
 	return err
 }
@@ -176,15 +186,16 @@ func (p *Plugin) backfillIOSDistAssetsOnce(ctx context.Context) {
 	n += p.backfillIOSBlobColumn(ctx, "iosdist_certificates", "file_url", "package", "cert", "application/octet-stream", "private")
 	n += p.backfillIOSBlobColumn(ctx, "iosdist_profiles", "file_url", "package", "profile", "application/octet-stream", "private")
 	n += p.backfillIOSIcons(ctx)
-	// Normalize any asset-backed icon_url that still points at the old
-	// id-keyed route (/iosdist/icon/<dbid>) to the opaque slug form. Cheap
-	// (no re-upload) + idempotent — heals rows migrated by an earlier build.
+	// Normalize any asset-backed icon_url to the canonical, absolute,
+	// slug-keyed form (<publicBaseURL>/iosdist/icon/<slug>). Cheap (no
+	// re-upload) + idempotent — heals rows written by an earlier build
+	// (id-keyed or relative) and re-absolutizes if publicBaseURL changes.
 	if res, err := p.DB.ExecContext(ctx,
-		`UPDATE iosdist_apps SET icon_url = '/iosdist/icon/' || public_slug
+		`UPDATE iosdist_apps SET icon_url = $1 || '/iosdist/icon/' || public_slug
 		 WHERE COALESCE(icon_asset_id,0) > 0 AND public_slug <> ''
-		   AND icon_url <> '/iosdist/icon/' || public_slug`); err == nil {
+		   AND icon_url <> $1 || '/iosdist/icon/' || public_slug`, p.iconURLBase()); err == nil {
 		if rows, _ := res.RowsAffected(); rows > 0 {
-			log.Printf("iosdist: normalized %d icon_url(s) to slug-keyed route", rows)
+			log.Printf("iosdist: normalized %d icon_url(s) to absolute slug-keyed route", rows)
 		}
 	}
 	if n > 0 {
