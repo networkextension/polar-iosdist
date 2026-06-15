@@ -277,17 +277,14 @@ func pickDistTypeForSign(profileKind, sourceDist string) string {
 	return "ad_hoc"
 }
 
-// fetchAttachmentToFile copies an attachment URL to a local file. We
+// fetchAttachmentToFile copies an attachment URL to a local temp file. We
 // handle two kinds of URLs:
-//   - "/uploads/<key>" — local AttachmentStorage; copy from the upload dir
-//   - http(s)://       — remote (R2 public, mzstatic, etc.); HTTP GET
+//   - "asset://<id>"  — central catalog blob; internal AssetDownload
+//   - http(s)://      — remote (R2 public, mzstatic, etc.); HTTP GET
 func (p *Plugin) fetchAttachmentToFile(ctx context.Context, srcURL, dstPath string) error {
 	// Catalog-backed blob (single-write): fetch via internal AssetDownload.
 	if id, ok := parseAssetRef(srcURL); ok {
 		return p.fetchAssetToFile(ctx, id, dstPath)
-	}
-	if strings.HasPrefix(srcURL, "/uploads/") && p.BlobDir != "" {
-		return copyFile(filepath.Join(p.BlobDir, strings.TrimPrefix(srcURL, "/uploads/")), dstPath)
 	}
 	if !strings.HasPrefix(srcURL, "http://") && !strings.HasPrefix(srcURL, "https://") {
 		return fmt.Errorf("unsupported attachment URL: %q", srcURL)

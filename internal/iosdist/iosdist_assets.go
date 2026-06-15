@@ -148,171 +148,25 @@ func (p *Plugin) getIOSAppIconRef(slug string) (assetID int64, iconURL string, e
 }
 
 // handleIOSAppIconRedirect is the public, no-auth icon route, keyed by the
-// app's opaque public_slug. It 302s to a fresh signed asset URL for
-// migrated icons, or to the legacy absolute URL for icons not yet
-// backfilled.
+// app's opaque public_slug. It 302s to a fresh signed asset URL (icons live
+// exclusively in the central catalog post-cutover).
 func (p *Plugin) handleIOSAppIconRedirect(c *gin.Context) {
 	slug := c.Param("slug")
 	if slug == "" {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	assetID, legacy, err := p.getIOSAppIconRef(slug)
-	if err != nil || (assetID == 0 && legacy == "") {
+	assetID, _, err := p.getIOSAppIconRef(slug)
+	if err != nil || assetID == 0 {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	if assetID > 0 {
-		signed, serr := p.Dock.AssetDownloadURL(assetID)
-		if serr != nil || signed == "" {
-			log.Printf("iosdist: icon redirect slug=%s asset=%d sign failed: %v", slug, assetID, serr)
-			c.Status(http.StatusBadGateway)
-			return
-		}
-		c.Redirect(http.StatusFound, signed)
+	signed, serr := p.Dock.AssetDownloadURL(assetID)
+	if serr != nil || signed == "" {
+		log.Printf("iosdist: icon redirect slug=%s asset=%d sign failed: %v", slug, assetID, serr)
+		c.Status(http.StatusBadGateway)
 		return
 	}
-	// Legacy icon (pre-migration): bounce to its existing absolute URL.
-	c.Redirect(http.StatusFound, absolutizeURL(p.installPublicBaseURL(c), legacy))
+	c.Redirect(http.StatusFound, signed)
 }
 
-// backfillIOSDistAssetsOnce self-migrates any legacy local/remote blobs
-// into the assets catalog on boot (idempotent goroutine from Start()).
-// Each row whose blob still lives outside the catalog is fetched, uploaded
-// once, and its column rewritten to the asset reference.
-func (p *Plugin) backfillIOSDistAssetsOnce(ctx context.Context) {
-	n := 0
-	n += p.backfillIOSBlobColumn(ctx, "iosdist_versions", "ipa_url", "package", "ipa", "application/octet-stream", "public")
-	n += p.backfillIOSBlobColumn(ctx, "iosdist_certificates", "file_url", "package", "cert", "application/octet-stream", "private")
-	n += p.backfillIOSBlobColumn(ctx, "iosdist_profiles", "file_url", "package", "profile", "application/octet-stream", "private")
-	n += p.backfillIOSIcons(ctx)
-	// Normalize any asset-backed icon_url to the canonical, absolute,
-	// slug-keyed form (<publicBaseURL>/iosdist/icon/<slug>). Cheap (no
-	// re-upload) + idempotent — heals rows written by an earlier build
-	// (id-keyed or relative) and re-absolutizes if publicBaseURL changes.
-	if res, err := p.DB.ExecContext(ctx,
-		`UPDATE iosdist_apps SET icon_url = $1 || '/iosdist/icon/' || public_slug
-		 WHERE COALESCE(icon_asset_id,0) > 0 AND public_slug <> ''
-		   AND icon_url <> $1 || '/iosdist/icon/' || public_slug`, p.iconURLBase()); err == nil {
-		if rows, _ := res.RowsAffected(); rows > 0 {
-			log.Printf("iosdist: normalized %d icon_url(s) to absolute slug-keyed route", rows)
-		}
-	}
-	if n > 0 {
-		log.Printf("iosdist: asset backfill migrated %d blob(s) to the catalog", n)
-	}
-}
-
-// backfillIOSBlobColumn migrates marker-less rows of one *_url column.
-func (p *Plugin) backfillIOSBlobColumn(ctx context.Context, table, col, kind, label, mime, visibility string) int {
-	rows, err := p.DB.QueryContext(ctx,
-		`SELECT id, `+col+` FROM `+table+`
-		 WHERE `+col+` <> '' AND `+col+` NOT LIKE 'asset://%'`)
-	if err != nil {
-		log.Printf("iosdist: backfill %s.%s query: %v", table, col, err)
-		return 0
-	}
-	type row struct {
-		id  int64
-		url string
-	}
-	var pending []row
-	for rows.Next() {
-		var r row
-		var u sql.NullString
-		if err := rows.Scan(&r.id, &u); err != nil {
-			continue
-		}
-		r.url = u.String
-		pending = append(pending, r)
-	}
-	rows.Close()
-
-	migrated := 0
-	for _, r := range pending {
-		tmp, err := os.CreateTemp("", "iosdist-backfill-*")
-		if err != nil {
-			continue
-		}
-		tmpPath := tmp.Name()
-		tmp.Close()
-		if err := p.fetchAttachmentToFile(ctx, r.url, tmpPath); err != nil {
-			os.Remove(tmpPath)
-			log.Printf("iosdist: backfill %s id=%d fetch %q: %v (skip)", table, r.id, r.url, err)
-			continue
-		}
-		meta, err := p.uploadIOSBlobAsset(tmpPath, kind, "iosdist/"+label+"/"+iosdistRandHex(6), mime, visibility)
-		os.Remove(tmpPath)
-		if err != nil {
-			log.Printf("iosdist: backfill %s id=%d upload: %v (skip)", table, r.id, err)
-			continue
-		}
-		marker := "asset://" + strconv.FormatInt(meta.ID, 10)
-		if _, err := p.DB.ExecContext(ctx,
-			`UPDATE `+table+` SET `+col+` = $2 WHERE id = $1`, r.id, marker); err != nil {
-			log.Printf("iosdist: backfill %s id=%d update: %v", table, r.id, err)
-			continue
-		}
-		migrated++
-	}
-	return migrated
-}
-
-// backfillIOSIcons migrates app icons (which use the redirect route, not
-// the asset:// marker): any app with a legacy icon_url and no
-// icon_asset_id yet.
-func (p *Plugin) backfillIOSIcons(ctx context.Context) int {
-	rows, err := p.DB.QueryContext(ctx,
-		`SELECT id, COALESCE(workspace_id, ''), icon_url, icon_source FROM iosdist_apps
-		 WHERE icon_url <> '' AND icon_url NOT LIKE '/iosdist/icon/%' AND COALESCE(icon_asset_id, 0) = 0`)
-	if err != nil {
-		log.Printf("iosdist: backfill icons query: %v", err)
-		return 0
-	}
-	type row struct {
-		id     int64
-		ws     string
-		url    string
-		source string
-	}
-	var pending []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.ws, &r.url, &r.source); err != nil {
-			continue
-		}
-		pending = append(pending, r)
-	}
-	rows.Close()
-
-	migrated := 0
-	for _, r := range pending {
-		tmp, err := os.CreateTemp("", "iosdist-icon-*")
-		if err != nil {
-			continue
-		}
-		tmpPath := tmp.Name()
-		tmp.Close()
-		if err := p.fetchAttachmentToFile(ctx, r.url, tmpPath); err != nil {
-			os.Remove(tmpPath)
-			log.Printf("iosdist: backfill icon app=%d fetch %q: %v (skip)", r.id, r.url, err)
-			continue
-		}
-		meta, err := p.uploadIOSBlobAsset(tmpPath, "media", "iosdist/icon/"+iosdistRandHex(6), "image/png", "public")
-		os.Remove(tmpPath)
-		if err != nil {
-			log.Printf("iosdist: backfill icon app=%d upload: %v (skip)", r.id, err)
-			continue
-		}
-		src := r.source
-		if src == "" {
-			src = "manual"
-		}
-		if err := p.setIOSAppIconAsset(r.id, r.ws, meta.ID, src); err != nil {
-			log.Printf("iosdist: backfill icon app=%d set: %v", r.id, err)
-			continue
-		}
-		migrated++
-	}
-	return migrated
-}
