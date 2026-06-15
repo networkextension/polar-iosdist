@@ -329,7 +329,6 @@ func (p *Plugin) Start(ctx context.Context) {
 	go p.heartbeatLoop(ctx)
 	go p.runIOSSignWorker(ctx)
 	p.startIOSDistStatusSync(ctx)
-	go p.backfillIOSDistAssetsOnce(ctx) // self-migrate legacy local/remote blobs → assets
 }
 
 func (p *Plugin) Close() error {
