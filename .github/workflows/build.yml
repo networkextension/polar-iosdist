@@ -6,13 +6,19 @@ on:
     branches: [main]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # ci-mac @ .82 的 polar-cloud macOS VM（repo 级 self-hosted runner，
+    # 与 polar-WindTunnel / polar-firewall 同机）。
+    # 本仓是私有仓：跑 ubuntu-latest 会被账单拦下（4 秒零步骤，
+    # "recent account payments have failed"），自建 runner 不计费。
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-      - run: sed -i '/^replace github.com\/networkextension\/polar-sdk/d' go.mod
+      # 原写法是 GNU sed 的 `sed -i '<script>'`；BSD sed（macOS runner）会把
+      # 脚本当成备份后缀，报 "invalid command code"。用 perl 保持两边都能跑。
+      - run: perl -ni -e 'print unless m{^replace github\.com/networkextension/polar-sdk}' go.mod
       - run: go mod tidy
       - run: go vet ./...
       - run: go test -race ./...
